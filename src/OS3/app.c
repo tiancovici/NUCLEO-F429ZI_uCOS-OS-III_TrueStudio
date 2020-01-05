@@ -35,7 +35,9 @@
 */
 
 #include  <includes.h>
-
+#include "stm32f4xx_rcc.h"
+#include "stm32f4xx_gpio.h"
+#include "stm32f4xx.h"
 /*
 *********************************************************************************************************
 *                                            LOCAL DEFINES
@@ -43,6 +45,41 @@
 */
 
 #define  APP_TASK_EQ_0_ITERATION_NBR              16u
+/*
+*********************************************************************************************************
+*                                            TYPES DEFINITIONS
+*********************************************************************************************************
+*/
+typedef enum {
+   TASK_500MS,
+   TASK_1000MS,
+   TASK_2000MS,
+
+   TASK_N
+}task_e;
+typedef struct
+{
+   CPU_CHAR* name;
+   OS_TASK_PTR func;
+   OS_PRIO prio;
+   CPU_STK* pStack;
+   OS_TCB* pTcb;
+}task_t;
+
+/*
+*********************************************************************************************************
+*                                         FUNCTION PROTOTYPES
+*********************************************************************************************************
+*/
+static  void  AppTaskStart          (void     *p_arg);
+static  void  AppTaskCreate         (void);
+static  void  AppObjCreate          (void);
+
+static void AppTask_500ms(void *p_arg);
+static void AppTask_1000ms(void *p_arg);
+static void AppTask_2000ms(void *p_arg);
+
+static void Setup_Gpio(void);
 
 
 /*
@@ -50,26 +87,24 @@
 *                                       LOCAL GLOBAL VARIABLES
 *********************************************************************************************************
 */
-
-                                                                /* ----------------- APPLICATION GLOBALS -------------- */
+/* ----------------- APPLICATION GLOBALS -------------- */
 static  OS_TCB   AppTaskStartTCB;
 static  CPU_STK  AppTaskStartStk[APP_CFG_TASK_START_STK_SIZE];
-                                                                /* ------------ FLOATING POINT TEST TASK -------------- */
-static  OS_TCB       App_TaskEq0FpTCB;
-static  CPU_STK      App_TaskEq0FpStk[APP_CFG_TASK_EQ_STK_SIZE];
 
-/*
-*********************************************************************************************************
-*                                         FUNCTION PROTOTYPES
-*********************************************************************************************************
-*/
+static  OS_TCB       Task_500ms_TCB;
+static  OS_TCB       Task_1000ms_TCB;
+static  OS_TCB       Task_2000ms_TCB;
 
-static  void  AppTaskStart          (void     *p_arg);
-static  void  AppTaskCreate         (void);
-static  void  AppObjCreate          (void);
+static  CPU_STK  Task_500ms_Stack[APP_CFG_TASK_START_STK_SIZE];
+static  CPU_STK  Task_1000ms_Stack[APP_CFG_TASK_START_STK_SIZE];
+static  CPU_STK  Task_2000ms_Stack[APP_CFG_TASK_START_STK_SIZE];
 
-static  void  App_TaskEq0Fp         (void  *p_arg);             /* Floating Point Equation 0 task.                      */
-
+task_t cyclic_tasks[TASK_N] = {
+   {"Task_500ms" , AppTask_500ms,  0, &Task_500ms_Stack[0] , &Task_500ms_TCB},
+   {"Task_1000ms", AppTask_1000ms, 0, &Task_1000ms_Stack[0], &Task_1000ms_TCB},
+   {"Task_2000ms", AppTask_2000ms, 0, &Task_2000ms_Stack[0], &Task_2000ms_TCB},
+};
+/* ------------ FLOATING POINT TEST TASK -------------- */
 /*
 *********************************************************************************************************
 *                                                main()
@@ -87,13 +122,20 @@ int main(void)
 {
     OS_ERR  err;
 
+    /* Basic Init */
+    RCC_DeInit();
+    SystemCoreClockUpdate();
+    Setup_Gpio();
 
+    /* BSP Init */
     BSP_IntDisAll();                                            /* Disable all interrupts.                              */
-    
+
     CPU_Init();                                                 /* Initialize the uC/CPU Services                       */
     Mem_Init();                                                 /* Initialize Memory Management Module                  */
     Math_Init();                                                /* Initialize Mathematical Module                       */
 
+
+    /* OS Init */
     OSInit(&err);                                               /* Init uC/OS-III.                                      */
 
     OSTaskCreate((OS_TCB       *)&AppTaskStartTCB,              /* Create the start task                                */
@@ -110,14 +152,12 @@ int main(void)
                  (OS_OPT        )(OS_OPT_TASK_STK_CHK | OS_OPT_TASK_STK_CLR),
                  (OS_ERR       *)&err);
 
-    OSStart(&err);                                              /* Start multitasking (i.e. give control to uC/OS-III). */
+   OSStart(&err);   /* Start multitasking (i.e. give control to uC/OS-III). */
 
-    (void)&err;
+   (void)&err;
 
-    return (0u);
+   return (0u);
 }
-
-
 /*
 *********************************************************************************************************
 *                                          STARTUP TASK
@@ -133,17 +173,14 @@ int main(void)
 *                  used.  The compiler should not generate any code for this statement.
 *********************************************************************************************************
 */
-
 static  void  AppTaskStart (void *p_arg)
 {
     OS_ERR  err;
-
 
    (void)p_arg;
 
     BSP_Init();                                                 /* Initialize BSP functions                             */
     BSP_Tick_Init();                                            /* Initialize Tick Services.                            */
-
 
 #if OS_CFG_STAT_TASK_EN > 0u
     OSStatTaskCPUUsageInit(&err);                               /* Compute CPU capacity with no task running            */
@@ -153,41 +190,95 @@ static  void  AppTaskStart (void *p_arg)
     CPU_IntDisMeasMaxCurReset();
 #endif
 
-    BSP_LED_Off(0u);                                            /* Turn Off LEDs after initialization                   */
+   // BSP_LED_Off(0u);                                            /* Turn Off LEDs after initialization                   */
 
-    APP_TRACE_DBG(("Creating Application Kernel Objects\n\r"));
-    AppObjCreate();                                             /* Create Applicaiton kernel objects                    */
+   APP_TRACE_DBG(("Creating Application Kernel Objects\n\r"));
+   AppObjCreate();                                             /* Create Applicaiton kernel objects                    */
 
-    APP_TRACE_DBG(("Creating Application Tasks\n\r"));
-    AppTaskCreate();                                            /* Create Application tasks                             */
+   APP_TRACE_DBG(("Creating Application Tasks\n\r"));
+   AppTaskCreate();                                            /* Create Application tasks                             */
+}
 
-
+/*
+*********************************************************************************************************
+*                                          AppTask_500ms
+*
+* Description : Example of 500mS Task
+*
+* Arguments   : p_arg (unused)
+*
+* Returns     : none
+*
+* Note: Long period used to measure timing in person
+*********************************************************************************************************
+*/
+static void AppTask_500ms(void *p_arg)
+{
+    OS_ERR  err;
+    BSP_LED_On(1);
     while (DEF_TRUE) {                                          /* Task body, always written as an infinite loop.       */
+       BSP_LED_Toggle(1);
 
-        BSP_LED_Toggle(1u);
-        OSTimeDlyHMSM(0u, 0u, 1u, 0u,
-                      OS_OPT_TIME_HMSM_STRICT,
-                      &err);
-
-        BSP_LED_Toggle(2u);
-        OSTimeDlyHMSM(0u, 0u, 2u, 0u,
-                      OS_OPT_TIME_HMSM_STRICT,
-                      &err);
-
-        BSP_LED_Toggle(3u);
-        OSTimeDlyHMSM(0u, 0u, 3u, 0u,
-                      OS_OPT_TIME_HMSM_STRICT,
-                      &err);
-
-        BSP_LED_Toggle(4u);
-        OSTimeDlyHMSM(0u, 0u, 4u, 0u,
+        OSTimeDlyHMSM(0u, 0u, 0u, 500u,
                       OS_OPT_TIME_HMSM_STRICT,
                       &err);
 
     }
 }
 
+/*
+*********************************************************************************************************
+*                                          AppTask_1000ms
+*
+* Description : Example of 1000mS Task
+*
+* Arguments   : p_arg (unused)
+*
+* Returns     : none
+*
+* Note: Long period used to measure timing in person
+*********************************************************************************************************
+*/
+static void AppTask_1000ms(void *p_arg)
+{
+    OS_ERR  err;
+    BSP_LED_On(2);
+    while (DEF_TRUE) {                                          /* Task body, always written as an infinite loop.       */
+       BSP_LED_Toggle(2);
 
+        OSTimeDlyHMSM(0u, 0u, 1u, 0u,
+                      OS_OPT_TIME_HMSM_STRICT,
+                      &err);
+
+    }
+}
+
+/*
+*********************************************************************************************************
+*                                          AppTask_2000ms
+*
+* Description : Example of 2000mS Task
+*
+* Arguments   : p_arg (unused)
+*
+* Returns     : none
+*
+* Note: Long period used to measure timing in person
+*********************************************************************************************************
+*/
+static void AppTask_2000ms(void *p_arg)
+{
+    OS_ERR  err;
+    BSP_LED_On(3);
+    while (DEF_TRUE) {                                          /* Task body, always written as an infinite loop.       */
+       BSP_LED_Toggle(3);
+
+        OSTimeDlyHMSM(0u, 0u, 2u, 0u,
+                      OS_OPT_TIME_HMSM_STRICT,
+                      &err);
+
+    }
+}
 /*
 *********************************************************************************************************
 *                                          AppTaskCreate()
@@ -206,22 +297,30 @@ static  void  AppTaskStart (void *p_arg)
 
 static  void  AppTaskCreate (void)
 {
-    OS_ERR  os_err;
-    
-                                                                /* ------------- CREATE FLOATING POINT TASK ----------- */
-    OSTaskCreate((OS_TCB      *)&App_TaskEq0FpTCB,
-                 (CPU_CHAR    *)"FP  Equation 1",
-                 (OS_TASK_PTR  ) App_TaskEq0Fp, 
-                 (void        *) 0,
-                 (OS_PRIO      ) APP_CFG_TASK_EQ_PRIO,
-                 (CPU_STK     *)&App_TaskEq0FpStk[0],
-                 (CPU_STK_SIZE ) App_TaskEq0FpStk[APP_CFG_TASK_EQ_STK_SIZE / 10u],
-                 (CPU_STK_SIZE ) APP_CFG_TASK_EQ_STK_SIZE,
-                 (OS_MSG_QTY   ) 0u,
-                 (OS_TICK      ) 0u,
-                 (void        *) 0,
-                 (OS_OPT       )(OS_OPT_TASK_STK_CHK | OS_OPT_TASK_STK_CLR | OS_OPT_TASK_SAVE_FP),
-                 (OS_ERR      *)&os_err);
+   OS_ERR  err;
+
+   u8_t idx = 0;
+   task_t* pTask_Cfg;
+   for(idx = 0; idx < TASK_N; idx++)
+   {
+      pTask_Cfg = &cyclic_tasks[idx];
+
+      OSTaskCreate(
+            pTask_Cfg->pTcb,
+            pTask_Cfg->name,
+            pTask_Cfg->func,
+            (void         *)0u,
+            pTask_Cfg->prio,
+            pTask_Cfg->pStack,
+            pTask_Cfg->pStack[APP_CFG_TASK_START_STK_SIZE / 10u],
+            APP_CFG_TASK_START_STK_SIZE,
+            (OS_MSG_QTY    )0u,
+            (OS_TICK       )0u,
+            (void         *)0u,
+            (OS_OPT        )(OS_OPT_TASK_STK_CHK | OS_OPT_TASK_STK_CLR),
+            (OS_ERR       *)&err
+      );
+   }
 }
 
 
@@ -246,84 +345,38 @@ static  void  AppObjCreate (void)
 
 }
 
-
 /*
 *********************************************************************************************************
-*                                             App_TaskEq0Fp()
+*                                          Setup_Gpio()
 *
-* Description : This task finds the root of the following equation.
-*               f(x) =  e^-x(3.2 sin(x) - 0.5 cos(x)) using the bisection mehtod
+* Description : Configure LED GPIOs directly
 *
-* Argument(s) : p_arg   is the argument passed to 'App_TaskEq0Fp' by 'OSTaskCreate()'.
+* Argument(s) : none
 *
-* Return(s)   : none.
+* Return(s)   : none
 *
-* Note(s)     : none.
+* Caller(s)   : AppTaskStart()
+*
+* Note(s)     :
+*              LED1 PB0
+*              LED2 PB7
+*              LED3 PB14
+*
 *********************************************************************************************************
 */
-
-void  App_TaskEq0Fp (void  *p_arg)
+static void Setup_Gpio(void)
 {
-    CPU_FP32    a;
-    CPU_FP32    b;
-    CPU_FP32    c;
-    CPU_FP32    eps;
-    CPU_FP32    f_a;
-    CPU_FP32    f_c;
-    CPU_FP32    delta;
-    CPU_INT08U  iteration;
-    RAND_NBR    wait_cycles;
-        
-    
-    while (DEF_TRUE) {
-        eps       = 0.00001;
-        a         = 3.0; 
-        b         = 4.0;
-        delta     = a - b;
-        iteration = 0u;
-        if (delta < 0) {
-            delta = delta * -1.0;
-        }
-        
-        while (((2.00 * eps) < delta) || 
-               (iteration    > 20u  )) {
-            c   = (a + b) / 2.00;
-            f_a = (exp((-1.0) * a) * (3.2 * sin(a) - 0.5 * cos(a)));
-            f_c = (exp((-1.0) * c) * (3.2 * sin(c) - 0.5 * cos(c)));
-            
-            if (((f_a > 0.0) && (f_c < 0.0)) || 
-                ((f_a < 0.0) && (f_c > 0.0))) {
-                b = c;
-            } else if (((f_a > 0.0) && (f_c > 0.0)) || 
-                       ((f_a < 0.0) && (f_c < 0.0))) {
-                a = c;           
-            } else {
-                break;
-            }
-                
-            delta = a - b;
-            if (delta < 0) {
-               delta = delta * -1.0;
-            }
-            iteration++;
+   GPIO_InitTypeDef led_init = {0};
 
-            wait_cycles = Math_Rand();
-            wait_cycles = wait_cycles % 1000;
+   RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOB, ENABLE);
+   RCC_AHB2PeriphClockCmd(RCC_APB2Periph_SYSCFG, ENABLE);
 
-            while (wait_cycles > 0u) {
-                wait_cycles--;
-            }
+   led_init.GPIO_Mode   = GPIO_Mode_OUT;
+   led_init.GPIO_OType  = GPIO_OType_PP;
+   led_init.GPIO_Speed  = GPIO_Speed_2MHz;
+   led_init.GPIO_PuPd   = GPIO_PuPd_NOPULL;
+   led_init.GPIO_Pin    = GPIO_Pin_0 | GPIO_Pin_7 | GPIO_Pin_14;
 
-            if (iteration > APP_TASK_EQ_0_ITERATION_NBR) {
-                APP_TRACE_INFO(("App_TaskEq0Fp() max # iteration reached\n"));
-                break;
-            }            
-        }
-
-        APP_TRACE_INFO(("Eq0 Task Running ....\n"));
-        
-        if (iteration == APP_TASK_EQ_0_ITERATION_NBR) {
-            APP_TRACE_INFO(("Root = %f; f(c) = %f; #iterations : %d\n", c, f_c, iteration));
-        }
-    }
+   GPIO_Init(GPIOB, &led_init);
 }
+
